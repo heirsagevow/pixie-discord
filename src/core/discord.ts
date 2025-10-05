@@ -1,6 +1,6 @@
-import { 
-  Client, 
-  Events, 
+import {
+  Client,
+  Events,
   GatewayIntentBits,
   Message,
   ChatInputCommandInteraction,
@@ -13,7 +13,7 @@ import { AIEngine } from "./ai-engine.js";
 import { PersonaMetadata } from "../types/persona.js";
 import { VoiceProcessor } from "./voice-processor.js";
 import { DiscordVoiceManager } from "./discord-voice.js";
-import { 
+import {
   joinCommand,
   leaveCommand,
   infoCommand,
@@ -26,7 +26,7 @@ import {
   handleHelpCommand,
   handleAICommand,
   handleVADCommand,
-  initializeServices
+  initializeServices,
 } from "./commands.js";
 
 export class DiscordBot {
@@ -47,23 +47,23 @@ export class DiscordBot {
       ],
     });
 
-    // Initialize voice processing
+    // Initialize voice processing with Deepgram
     this.voiceProcessor = new VoiceProcessor();
     this.voiceManager = new DiscordVoiceManager(this.voiceProcessor);
     this.commands = new Collection();
-    
+
     // Load default persona (pixie)
     this.loadPersona("pixie");
-    
+
     this.setupCommands();
     this.setupEventHandlers();
   }
-  
+
   private async loadPersona(personaId: string): Promise<void> {
     try {
       // Import persona dynamically from the personas directory
-      const personaModule = await import(`../personas/${personaId}.json`, { 
-        assert: { type: "json" } 
+      const personaModule = await import(`../personas/${personaId}.json`, {
+        assert: { type: "json" },
       });
       this.currentPersona = personaModule.default;
       console.log(`✅ Loaded persona: ${this.currentPersona?.name}`);
@@ -80,17 +80,17 @@ export class DiscordBot {
           allowed_topics: [],
           forbidden_topics: [],
           response_style: [],
-          conversation_guidelines: []
+          conversation_guidelines: [],
         },
         behavior: {
           personality_traits: [],
           emotional_range: [],
           interaction_preferences: [],
-          conversation_style: []
-        }
+          conversation_style: [],
+        },
       };
     }
-    
+
     // Set persona to AI engine if available
     if (this.aiEngine && this.currentPersona) {
       this.aiEngine.setPersona(this.currentPersona);
@@ -100,8 +100,8 @@ export class DiscordBot {
   private setupCommands(): void {
     // Initialize services for commands
     initializeServices(
-      this.voiceManager, 
-      this.currentPersona, 
+      this.voiceManager,
+      this.currentPersona,
       this.aiEngine,
       this.voiceProcessor
     );
@@ -109,27 +109,27 @@ export class DiscordBot {
     // Register all commands
     this.commands.set(joinCommand.name, {
       data: joinCommand,
-      execute: handleJoinCommand
+      execute: handleJoinCommand,
     });
     this.commands.set(leaveCommand.name, {
       data: leaveCommand,
-      execute: handleLeaveCommand
+      execute: handleLeaveCommand,
     });
     this.commands.set(infoCommand.name, {
       data: infoCommand,
-      execute: handleInfoCommand
+      execute: handleInfoCommand,
     });
     this.commands.set(helpCommand.name, {
       data: helpCommand,
-      execute: handleHelpCommand
+      execute: handleHelpCommand,
     });
     this.commands.set(aiCommand.name, {
       data: aiCommand,
-      execute: this.handleAICommandWrapper.bind(this)
+      execute: this.handleAICommandWrapper.bind(this),
     });
     this.commands.set(vadCommand.name, {
       data: vadCommand,
-      execute: handleVADCommand
+      execute: handleVADCommand,
     });
   }
 
@@ -149,7 +149,10 @@ export class DiscordBot {
         console.error("Error handling command:", error);
         const errorMessage = "An error occurred while executing the command.";
         if (interaction.replied || interaction.deferred) {
-          await interaction.followUp({ content: errorMessage, ephemeral: true });
+          await interaction.followUp({
+            content: errorMessage,
+            ephemeral: true,
+          });
         } else {
           await interaction.reply({ content: errorMessage, ephemeral: true });
         }
@@ -163,23 +166,28 @@ export class DiscordBot {
     });
   }
 
-  private async handleCommand(interaction: ChatInputCommandInteraction): Promise<void> {
+  private async handleCommand(
+    interaction: ChatInputCommandInteraction
+  ): Promise<void> {
     const command = this.commands.get(interaction.commandName);
-    
+
     if (!command) {
-      await interaction.reply({ 
+      await interaction.reply({
         content: "Unknown command",
-        ephemeral: true 
+        ephemeral: true,
       });
       return;
     }
-    
+
     try {
       await command.execute(interaction);
     } catch (error) {
-      console.error(`Error executing command ${interaction.commandName}:`, error);
+      console.error(
+        `Error executing command ${interaction.commandName}:`,
+        error
+      );
       const errorMessage = "An error occurred while executing the command.";
-      
+
       if (interaction.replied || interaction.deferred) {
         await interaction.followUp({ content: errorMessage, ephemeral: true });
       } else {
@@ -188,14 +196,16 @@ export class DiscordBot {
     }
   }
 
-  private async handleAICommandWrapper(interaction: ChatInputCommandInteraction): Promise<void> {
+  private async handleAICommandWrapper(
+    interaction: ChatInputCommandInteraction
+  ): Promise<void> {
     try {
       await handleAICommand(interaction);
     } catch (error) {
       console.error("Error handling AI command:", error);
-      await interaction.reply({ 
-        content: "Failed to switch AI engine.", 
-        ephemeral: true 
+      await interaction.reply({
+        content: "Failed to switch AI engine.",
+        ephemeral: true,
       });
     }
   }
@@ -214,16 +224,16 @@ export class DiscordBot {
 
       // Handle emotional response if available
       const emoji = this.getEmoji(response.emotional_response.emotion);
-      
+
       await message.reply({
         content: `${emoji} ${response.text}`,
-        allowedMentions: { repliedUser: true }
+        allowedMentions: { repliedUser: true },
       });
     } catch (error) {
       console.error("Error generating AI response:", error);
       await message.reply({
         content: "Maaf, aku lagi ada masalah teknis... 🥺",
-        allowedMentions: { repliedUser: true }
+        allowedMentions: { repliedUser: true },
       });
     }
   }
@@ -234,7 +244,7 @@ export class DiscordBot {
       sad: "😢",
       angry: "😠",
       confused: "🤔",
-      neutral: "🙂"
+      neutral: "🙂",
     };
     return emojis[emotion] || "💫";
   }
@@ -242,15 +252,15 @@ export class DiscordBot {
   public setAIEngine(engine: AIEngine): void {
     this.aiEngine = engine;
     this.voiceManager.setAIEngine(engine);
-    
+
     // Set persona to AI engine
     if (this.currentPersona) {
       this.aiEngine.setPersona(this.currentPersona);
     }
-    
+
     initializeServices(
-      this.voiceManager, 
-      this.currentPersona, 
+      this.voiceManager,
+      this.currentPersona,
       this.aiEngine,
       this.voiceProcessor
     );
@@ -267,12 +277,13 @@ export class DiscordBot {
       console.log("🔄 Refreshing application (/) commands...");
 
       // Extract command data for registration
-      const commandsData = Array.from(this.commands.values()).map(cmd => cmd.data);
-
-      await rest.put(
-        Routes.applicationCommands(cfg.DISCORD_CLIENT_ID),
-        { body: commandsData }
+      const commandsData = Array.from(this.commands.values()).map(
+        (cmd) => cmd.data
       );
+
+      await rest.put(Routes.applicationCommands(cfg.DISCORD_CLIENT_ID), {
+        body: commandsData,
+      });
 
       console.log("✅ Successfully reloaded application (/) commands");
       await this.client.login(cfg.DISCORD_TOKEN);

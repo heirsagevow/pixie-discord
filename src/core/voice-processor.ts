@@ -1,6 +1,6 @@
-import speech from "@google-cloud/speech";
-import textToSpeech from "@google-cloud/text-to-speech";
-import { Transform, PassThrough } from "stream";
+import { createClient, LiveTranscriptionEvents } from "@deepgram/sdk";
+import { Transform } from "stream";
+import { cfg } from "../utils/config.js";
 
 interface AudioChunk {
   data: Buffer;
@@ -8,17 +8,15 @@ interface AudioChunk {
 }
 
 export class VoiceProcessor {
-  private speechClient: speech.SpeechClient;
-  private ttsClient: textToSpeech.TextToSpeechClient;
+  private deepgram: ReturnType<typeof createClient>;
   private audioBuffer: AudioChunk[] = [];
   private isProcessing = false;
-  private silenceThreshold = 500; // ms of silence before processing
+  private silenceThreshold = 500;
   private lastAudioTime = 0;
   private vadEnabled = true;
 
   constructor() {
-    this.speechClient = new speech.SpeechClient();
-    this.ttsClient = new textToSpeech.TextToSpeechClient();
+    this.deepgram = createClient(cfg.DEEPGRAM_API_KEY);
   }
 
   /**
@@ -27,7 +25,6 @@ export class VoiceProcessor {
   private detectSpeech(audioData: Buffer): boolean {
     if (!this.vadEnabled) return true;
 
-    // Calculate audio energy (simple RMS)
     let sum = 0;
     for (let i = 0; i < audioData.length; i += 2) {
       const sample = audioData.readInt16LE(i);
@@ -35,72 +32,82 @@ export class VoiceProcessor {
     }
     const rms = Math.sqrt(sum / (audioData.length / 2));
 
-    // Threshold for speech detection (adjust based on testing)
     return rms > 1000;
   }
 
   /**
-   * Process incoming audio stream from Discord
+   * Process incoming audio stream from Discord using Deepgram
    */
   async processAudioStream(
     audioStream: NodeJS.ReadableStream
   ): Promise<string> {
     return new Promise((resolve, reject) => {
-      const recognizeStream = this.speechClient
-        .streamingRecognize({
-          config: {
-            encoding: "LINEAR16",
-            sampleRateHertz: 48000,
-            languageCode: "id-ID",
-            alternativeLanguageCodes: ["en-US"],
-            enableAutomaticPunctuation: true,
-            model: "latest_short",
-            useEnhanced: true,
-          },
-          interimResults: false,
-        } as any)
-        .on("error", (error) => {
-          console.error("STT Error:", error);
-          reject(error);
-        })
-        .on("data", (data: any) => {
-          if (data.results[0] && data.results[0].alternatives[0]) {
-            const transcription = data.results[0].alternatives[0].transcript;
-            if (transcription) {
-              resolve(transcription);
-            }
-          }
-        });
+      let transcription = "";
+      let hasReceivedData = false;
 
-      // Audio stream is already PCM from Discord (after prism-media decoding)
-      // Just apply VAD and pipe to Google Speech
+      const deepgramLive = this.deepgram.listen.live({
+        model: "nova-2",
+        language: "id", // Indonesian
+        smart_format: true,
+        punctuate: true,
+        interim_results: false,
+        encoding: "linear16",
+        sample_rate: 48000,
+        channels: 1,
+      });
+
+      deepgramLive.on(LiveTranscriptionEvents.Open, () => {
+        console.log("🎤 Deepgram connection opened");
+      });
+
+      deepgramLive.on(LiveTranscriptionEvents.Transcript, (data) => {
+        const transcript = data.channel?.alternatives?.[0]?.transcript;
+        if (transcript && transcript.length > 0) {
+          hasReceivedData = true;
+          transcription += transcript + " ";
+          console.log("📝 Partial transcript:", transcript);
+        }
+      });
+
+      deepgramLive.on(LiveTranscriptionEvents.Error, (error) => {
+        console.error("Deepgram error:", error);
+        reject(error);
+      });
+
+      deepgramLive.on(LiveTranscriptionEvents.Close, () => {
+        console.log("🔚 Deepgram connection closed");
+        if (hasReceivedData && transcription.trim()) {
+          resolve(transcription.trim());
+        } else if (!hasReceivedData) {
+          reject(new Error("No speech detected"));
+        }
+      });
+
+      // Apply VAD and pipe to Deepgram
       const vadStream = new Transform({
         transform: (chunk: Buffer, encoding, callback) => {
           try {
-            // VAD check
             if (this.detectSpeech(chunk)) {
               this.lastAudioTime = Date.now();
               this.audioBuffer.push({
                 data: chunk,
                 timestamp: Date.now(),
               });
-              callback(null, chunk);
+              // Send audio to Deepgram (type assertion for compatibility)
+              (deepgramLive.send as any)(chunk);
+              callback();
             } else {
-              // Check if we should process buffered audio
               const silenceDuration = Date.now() - this.lastAudioTime;
               if (
                 silenceDuration > this.silenceThreshold &&
                 this.audioBuffer.length > 0
               ) {
-                // Flush buffer to recognition
-                const combinedBuffer = Buffer.concat(
-                  this.audioBuffer.map((chunk) => chunk.data)
-                );
-                this.audioBuffer = [];
-                callback(null, combinedBuffer);
-                return;
+                // End of speech detected, finish stream
+                deepgramLive.finish();
+                callback();
+              } else {
+                callback();
               }
-              callback();
             }
           } catch (error) {
             callback(error as Error);
@@ -108,47 +115,52 @@ export class VoiceProcessor {
         },
       });
 
-      audioStream.pipe(vadStream).pipe(recognizeStream);
+      audioStream.pipe(vadStream);
 
-      // Timeout if no speech detected
+      // Timeout
       setTimeout(() => {
-        if (!this.isProcessing) {
-          recognizeStream.destroy();
+        if (!hasReceivedData) {
+          deepgramLive.finish();
           reject(new Error("Speech timeout"));
         }
-      }, 10000); // 10 second timeout
+      }, 10000);
     });
   }
 
   /**
-   * Convert text to speech using Google TTS
+   * Text to speech using Deepgram Aura
    */
   async textToSpeech(
     text: string,
-    languageCode: string = "id-ID",
-    voiceName?: string
+    voice: string = "aura-asteria-id" // Indonesian voice
   ): Promise<Buffer> {
     try {
-      const [response] = await this.ttsClient.synthesizeSpeech({
-        input: { text },
-        voice: {
-          languageCode,
-          name: voiceName || "id-ID-Standard-A",
-          ssmlGender: "FEMALE",
-        },
-        audioConfig: {
-          audioEncoding: "OGG_OPUS",
-          sampleRateHertz: 48000,
-          pitch: 0,
-          speakingRate: 1.0,
-        },
-      } as any);
+      const response = await this.deepgram.speak.request(
+        { text },
+        {
+          model: voice,
+          encoding: "opus",
+          sample_rate: 48000,
+        }
+      );
 
-      if (!response.audioContent) {
-        throw new Error("No audio content received from TTS");
+      // Get audio stream
+      const stream = await response.getStream();
+      if (!stream) {
+        throw new Error("No audio stream received");
       }
 
-      return Buffer.from(response.audioContent as Uint8Array);
+      // Convert stream to buffer
+      const chunks: Buffer[] = [];
+      const reader = stream.getReader();
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        chunks.push(Buffer.from(value));
+      }
+
+      return Buffer.concat(chunks);
     } catch (error) {
       console.error("TTS Error:", error);
       throw error;
@@ -156,54 +168,43 @@ export class VoiceProcessor {
   }
 
   /**
-   * Process a complete voice interaction
+   * Process complete voice interaction
    */
   async processVoiceInteraction(
     audioStream: NodeJS.ReadableStream,
     onTranscription: (text: string) => Promise<string>,
-    languageCode: string = "id-ID"
+    voice: string = "aura-asteria-id"
   ): Promise<Buffer> {
     this.isProcessing = true;
 
     try {
-      // Step 1: Speech to Text
       console.log("🎤 Listening for speech...");
       const transcription = await this.processAudioStream(audioStream);
       console.log("📝 Transcribed:", transcription);
 
-      // Step 2: AI Processing
       console.log("🤖 Processing with AI...");
       const aiResponse = await onTranscription(transcription);
       console.log("💬 AI Response:", aiResponse);
 
-      // Step 3: Text to Speech
       console.log("🔊 Converting to speech...");
-      const audioBuffer = await this.textToSpeech(aiResponse, languageCode);
+      const audioBuffer = await this.textToSpeech(aiResponse, voice);
       console.log("✅ Voice processing complete");
 
       return audioBuffer;
     } finally {
       this.isProcessing = false;
+      this.audioBuffer = [];
     }
   }
 
-  /**
-   * Enable/disable VAD
-   */
   setVAD(enabled: boolean): void {
     this.vadEnabled = enabled;
   }
 
-  /**
-   * Set silence threshold for VAD
-   */
   setSilenceThreshold(ms: number): void {
     this.silenceThreshold = ms;
   }
 
-  /**
-   * Check if currently processing
-   */
   isCurrentlyProcessing(): boolean {
     return this.isProcessing;
   }
