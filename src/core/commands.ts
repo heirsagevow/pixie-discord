@@ -5,32 +5,36 @@ import {
   PermissionFlagsBits,
   ChatInputCommandInteraction,
   SlashCommandStringOption,
+  SlashCommandBooleanOption,
   VoiceBasedChannel
 } from "discord.js";
-import { LiveKitService } from "./livekit.js";
-import {  AIModelType } from "../types/ai-models.js";
-import { joinVoiceChannel } from "@discordjs/voice";
+import { DiscordVoiceManager } from "./discord-voice.js";
+import { AIModelType } from "../types/ai-models.js";
 import { PersonaMetadata } from "../types/persona.js";
 import { AIEngine } from "./ai-engine.js";
+import { VoiceProcessor } from "./voice-processor.js";
 
 // Service instances will be injected from DiscordBot
-let livekitService: LiveKitService | null = null;
+let voiceManager: DiscordVoiceManager | null = null;
 let currentPersona: PersonaMetadata | null = null;
 let aiEngine: AIEngine | null = null;
+let voiceProcessor: VoiceProcessor | null = null;
 
 export function initializeServices(
-  livekit: LiveKitService,
+  voice: DiscordVoiceManager,
   persona: PersonaMetadata | null = null,
-  ai: AIEngine | null = null
+  ai: AIEngine | null = null,
+  processor: VoiceProcessor | null = null
 ) {
-  livekitService = livekit;
+  voiceManager = voice;
   currentPersona = persona;
   aiEngine = ai;
+  voiceProcessor = processor;
 }
 
 export const joinCommand = new SlashCommandBuilder()
   .setName("join")
-  .setDescription("Join a voice channel")
+  .setDescription("Join your voice channel and start listening")
   .setDefaultMemberPermissions(PermissionFlagsBits.Connect);
 
 export const leaveCommand = new SlashCommandBuilder()
@@ -61,6 +65,16 @@ export const aiCommand = new SlashCommandBuilder()
       )
   );
 
+export const vadCommand = new SlashCommandBuilder()
+  .setName("vad")
+  .setDescription("Configure Voice Activity Detection")
+  .addBooleanOption((option: SlashCommandBooleanOption) =>
+    option
+      .setName("enabled")
+      .setDescription("Enable or disable VAD")
+      .setRequired(true)
+  );
+
 async function validateMemberAndVoice(
   interaction: CommandInteraction
 ): Promise<{ member: GuildMember; voiceChannel?: VoiceBasedChannel } | null> {
@@ -86,50 +100,48 @@ export async function handleJoinCommand(interaction: ChatInputCommandInteraction
     const { member, voiceChannel } = validation;
     if (!voiceChannel) {
       await interaction.reply({ 
-        content: "❌ You need to be in a voice channel first!", 
+        content: "❌ Kamu harus masuk ke voice channel dulu ya!", 
         ephemeral: true 
       });
       return;
     }
 
-    // Connect to Discord voice channel
+    if (!voiceManager) {
+      await interaction.reply({
+        content: "❌ Voice service tidak tersedia.",
+        ephemeral: true
+      });
+      return;
+    }
+
+    await interaction.deferReply();
+
     try {
-      const connection = joinVoiceChannel({
-        channelId: voiceChannel.id,
-        guildId: voiceChannel.guild.id,
-        adapterCreator: voiceChannel.guild.voiceAdapterCreator,
-      });
+      await voiceManager.joinChannel(voiceChannel);
 
-      await interaction.reply({ 
-        content: `✅ Joined **${voiceChannel.name}**! Ready to chat!` 
+      await interaction.editReply({ 
+        content: `✅ Aku udah masuk ke **${voiceChannel.name}**! Sekarang kita bisa ngobrol lewat voice~ 🎤💫` 
       });
-
-      // Connect to LiveKit if available
-      if (livekitService) {
-        try {
-          await livekitService.joinRoom(
-            member.id,
-            `${voiceChannel.guild.id}-${voiceChannel.id}`
-          );
-        } catch (livekitError) {
-          console.error("⚠️ LiveKit connection failed, but Discord voice connected:", livekitError);
-        }
-      }
 
     } catch (err) {
-      console.error("❌ Error connecting to Discord voice channel:", err);
-      await interaction.reply({ 
-        content: "❌ Failed to join voice channel. Please check bot permissions.", 
-        ephemeral: true 
+      console.error("❌ Error connecting to voice channel:", err);
+      await interaction.editReply({ 
+        content: "❌ Gagal masuk ke voice channel. Coba cek permission bot ya!" 
       });
     }
 
   } catch (error) {
     console.error("❌ Failed to join voice channel:", error);
-    await interaction.reply({ 
-      content: "❌ Failed to join voice channel.", 
-      ephemeral: true 
-    });
+    if (interaction.deferred) {
+      await interaction.editReply({ 
+        content: "❌ Gagal masuk ke voice channel." 
+      });
+    } else {
+      await interaction.reply({ 
+        content: "❌ Gagal masuk ke voice channel.", 
+        ephemeral: true 
+      });
+    }
   }
 }
 
@@ -138,27 +150,23 @@ export async function handleLeaveCommand(interaction: ChatInputCommandInteractio
     const validation = await validateMemberAndVoice(interaction);
     if (!validation) return;
 
-    // Disconnect from Discord voice channel
-    const guild = interaction.guild;
-    if (guild && guild.members.me?.voice.channel) {
-      await guild.members.me.voice.disconnect();
+    if (!voiceManager) {
+      await interaction.reply({
+        content: "❌ Voice service tidak tersedia.",
+        ephemeral: true
+      });
+      return;
     }
 
-    // Also disconnect from LiveKit if available
-    if (livekitService) {
-      try {
-        await livekitService.leaveRoom();
-      } catch (livekitError) {
-        console.error("LiveKit disconnection failed, but Discord voice disconnected:", livekitError);
-        // Continue even if LiveKit fails
-      }
-    }
+    await voiceManager.leaveChannel();
 
-    await interaction.reply({ content: "Left the voice channel! See you later! 👋" });
+    await interaction.reply({ 
+      content: "Sampai jumpa lagi~ 👋✨" 
+    });
   } catch (error) {
     console.error("Failed to leave voice channel:", error);
     await interaction.reply({ 
-      content: "Failed to leave voice channel.", 
+      content: "Gagal keluar dari voice channel.", 
       ephemeral: true 
     });
   }
@@ -166,18 +174,26 @@ export async function handleLeaveCommand(interaction: ChatInputCommandInteractio
 
 export async function handleInfoCommand(interaction: CommandInteraction): Promise<void> {
   try {
+    const voiceStatus = voiceManager?.isConnected() 
+      ? "🟢 Connected" 
+      : "🔴 Not connected";
+
     const info = [
-      "🎵 **About Pixie** 🎵",
+      "✨ **Tentang Pixie** ✨",
       "",
-      "I'm your AI-powered voice assistant!",
+      "Aku adalah AI companion yang bisa ngobrol sama kamu lewat voice!",
       currentPersona ? [
-        `\nCurrent Persona: ${currentPersona.name}`,
-        `Role: ${currentPersona.role}`,
-        `Style: ${currentPersona.speech_patterns.join(", ")}`
+        `\n**Persona**: ${currentPersona.name}`,
+        `**Role**: ${currentPersona.role}`,
+        `**Background**: ${currentPersona.background}`,
       ].join("\n") : "",
-      aiEngine ? `\nAI Engine: ${aiEngine.getActiveModel()}` : "",
-      "\nI can chat with you in voice channels and help with various tasks.",
-      "\nUse `/help` to see all available commands!"
+      aiEngine ? `\n**AI Engine**: ${aiEngine.getActiveModel()}` : "",
+      `**Voice Status**: ${voiceStatus}`,
+      "\nAku bisa:",
+      "• Mendengarkan suara kamu secara real-time",
+      "• Memproses dengan AI dan menjawab dengan natural",
+      "• Mengingat konteks percakapan kita",
+      "\nGunakan `/help` untuk lihat semua command!"
     ].filter(Boolean).join("\n");
 
     await interaction.reply({
@@ -196,15 +212,24 @@ export async function handleInfoCommand(interaction: CommandInteraction): Promis
 export async function handleHelpCommand(interaction: CommandInteraction): Promise<void> {
   try {
     const helpMessage = `
-🎮 **Available Commands** 🎮
+✨ **Command yang Tersedia** ✨
 
-• /join - Join your voice channel
-• /leave - Leave the current voice channel
-• /info - Get information about me
-• /ai - Configure AI engine (Gemini/OpenAI/Anthropic)
-• /help - Show this help message
+🎤 **Voice Commands**
+• \`/join\` - Aku akan masuk ke voice channel kamu
+• \`/leave\` - Aku akan keluar dari voice channel
+• \`/vad <enabled>\` - Aktifkan/nonaktifkan Voice Activity Detection
 
-Need more help? Feel free to ask!
+🤖 **AI Commands**
+• \`/ai <engine>\` - Ganti AI engine (Gemini/OpenAI/Anthropic)
+• \`/info\` - Info tentang aku
+• \`/help\` - Lihat pesan ini
+
+💡 **Tips:**
+• Pastikan bot punya permission untuk join & speak di voice channel
+• Gunakan VAD untuk deteksi suara otomatis
+• Aku bisa ngerti bahasa Indonesia dan English!
+
+Butuh bantuan lain? Langsung aja tanya! 💫
     `.trim();
 
     await interaction.reply({
@@ -226,7 +251,7 @@ export async function handleAICommand(interaction: ChatInputCommandInteraction):
     
     if (!aiEngine) {
       await interaction.reply({ 
-        content: "AI service is not available.", 
+        content: "❌ AI service tidak tersedia.", 
         ephemeral: true 
       });
       return;
@@ -235,20 +260,49 @@ export async function handleAICommand(interaction: ChatInputCommandInteraction):
     const success = await aiEngine.switchModel(engine);
     if (!success) {
       await interaction.reply({ 
-        content: "Failed to switch AI engine. The selected engine might not be available.", 
+        content: "❌ Gagal ganti AI engine. Engine yang dipilih mungkin tidak tersedia.", 
         ephemeral: true 
       });
       return;
     }
 
     await interaction.reply({ 
-      content: `Switched to ${aiEngine.getActiveModel()}! Ready to chat with the new AI engine!`,
+      content: `✅ Berhasil ganti ke ${aiEngine.getActiveModel()}! Siap ngobrol dengan AI engine baru! 🤖`,
       ephemeral: true 
     });
   } catch (error) {
     console.error("Failed to switch AI engine:", error);
     await interaction.reply({ 
-      content: "Failed to switch AI engine.", 
+      content: "❌ Gagal ganti AI engine.", 
+      ephemeral: true 
+    });
+  }
+}
+
+export async function handleVADCommand(interaction: ChatInputCommandInteraction): Promise<void> {
+  try {
+    const enabled = interaction.options.getBoolean("enabled", true);
+    
+    if (!voiceProcessor) {
+      await interaction.reply({ 
+        content: "❌ Voice processor tidak tersedia.", 
+        ephemeral: true 
+      });
+      return;
+    }
+
+    voiceProcessor.setVAD(enabled);
+
+    await interaction.reply({ 
+      content: enabled 
+        ? "✅ Voice Activity Detection diaktifkan! Aku akan otomatis detect kapan kamu ngomong." 
+        : "✅ Voice Activity Detection dinonaktifkan. Aku akan proses semua audio.",
+      ephemeral: true 
+    });
+  } catch (error) {
+    console.error("Failed to configure VAD:", error);
+    await interaction.reply({ 
+      content: "❌ Gagal konfigurasi VAD.", 
       ephemeral: true 
     });
   }

@@ -9,17 +9,16 @@ export const cfg = createEnv({
     DISCORD_CLIENT_ID: z.string().min(1),
     DISCORD_GUILD_ID: z.string().min(1),
     
-    // LiveKit Configuration
-    LIVEKIT_API_KEY: z.string().min(1),
-    LIVEKIT_API_SECRET: z.string().min(1),
-    LIVEKIT_URL: z.string().url(),
+    // Google Cloud Configuration (for STT & TTS)
+    GOOGLE_APPLICATION_CREDENTIALS: z.string().optional(),
+    GOOGLE_PROJECT_ID: z.string().optional(),
     
-    // Redis Configuration
+    // Redis Configuration (Optional - for memory)
     REDIS_URL: z.string().url().default("redis://localhost:6379"),
     REDIS_PASSWORD: z.string().optional(),
     
     // AI Model Configuration
-    DEFAULT_AI_MODEL: z.enum(["gemini", "openai", "anthropic", "local"]).default("gemini"),
+    DEFAULT_AI_MODEL: z.enum(["gemini", "openai", "anthropic"]).default("gemini"),
     
     // Gemini Configuration (Optional)
     GEMINI_API_KEYS: z
@@ -33,21 +32,26 @@ export const cfg = createEnv({
     
     // Anthropic Configuration (Optional)
     ANTHROPIC_API_KEY: z.string().optional(),
-    ANTHROPIC_MODEL: z.string().default("claude-2"),
+    ANTHROPIC_MODEL: z.string().default("claude-3-sonnet-20240229"),
     
     // Persona Settings
     DEFAULT_PERSONA: z.string().default("pixie"),
     
-    // Optional local model settings
-    LOCAL_MODEL_PATH: z.string().optional(),
-    LOCAL_MODEL_TYPE: z.string().optional(),
+    // Voice Settings
+    TTS_LANGUAGE: z.string().default("id-ID"),
+    TTS_VOICE_NAME: z.string().default("id-ID-Standard-A"),
+    STT_LANGUAGE: z.string().default("id-ID"),
+    
+    // VAD Settings
+    VAD_ENABLED: z.string().transform((v) => v === "true").default(true),
+    VAD_SILENCE_THRESHOLD: z.string().transform(Number).default(500),
   },
   runtimeEnv: process.env,
 });
 
 // AI Model configurations
 export const aiConfig = {
-  gemini: cfg.GEMINI_API_KEYS ? {
+  gemini: cfg.GEMINI_API_KEYS && cfg.GEMINI_API_KEYS.length > 0 ? {
     api_keys: cfg.GEMINI_API_KEYS,
     model_name: "gemini-pro",
     temperature: 0.9,
@@ -64,9 +68,5 @@ export const aiConfig = {
     model_name: cfg.ANTHROPIC_MODEL,
     temperature: 0.9,
     max_tokens: 300,
-  } : null,
-  local: cfg.LOCAL_MODEL_PATH ? {
-    model_path: cfg.LOCAL_MODEL_PATH,
-    model_type: cfg.LOCAL_MODEL_TYPE,
   } : null,
 } as const;
